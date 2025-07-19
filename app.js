@@ -94,7 +94,7 @@ wss.on('connection', (ws) => {
                 }
             }
             console.log('LLM stream finished.');
-            ws.close(); // Close WebSocket connection after stream ends
+            ws.close();
         } catch (error) {
             console.error('WebSocket message processing error:', error);
             if (ws.readyState === WebSocket.OPEN) {
