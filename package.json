@@ -1,0 +1,16 @@
+{
+  "name": "realtime-ai-streamer",
+  "version": "1.0.0",
+  "description": "A real-time AI content streamer using WebSockets and Google's Gemini 2.0 Flash model.",
+  "main": "app.js",
+  "scripts": {
+    "start": "node app.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {},
+  "author": "Varun Mahajan",
+  "license": "MIT"
+}
