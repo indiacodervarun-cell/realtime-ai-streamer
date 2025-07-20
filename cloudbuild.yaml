@@ -38,3 +38,6 @@ images:
 substitutions:
   _GEMINI_API_KEY: "" # This will be overridden by the trigger or gcloud command
   _BUILD_TAG: "latest"
+
+options:
+  logging: CLOUD_LOGGING_ONLY
