@@ -101,13 +101,30 @@
             opacity: 1;
         }
     </style>
+    <!-- Firebase SDKs -->
+    <script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-auth-compat.js"></script>
 </head>
 <body>
     <div class="container">
         <h1 class="text-3xl font-bold text-center text-white">Real-time AI Content Streamer</h1>
-        <p class="text-center text-gray-400">Enter a prompt and watch the AI response stream live!</p>
+        <p class="text-center text-gray-400">Login to access the AI stream!</p>
 
-        <div class="flex flex-col gap-3">
+        <!-- Login Section -->
+        <div id="authSection" class="flex flex-col gap-4 p-6 bg-gray-700 rounded-lg shadow-inner">
+            <h2 class="text-2xl font-semibold text-white text-center">Login</h2>
+            <input type="email" id="emailInput" placeholder="Email" class="w-full p-3 border border-gray-600 rounded-lg bg-gray-800 text-white focus:outline-none focus:ring-2 focus:ring-blue-500">
+            <input type="password" id="passwordInput" placeholder="Password" class="w-full p-3 border border-gray-600 rounded-lg bg-gray-800 text-white focus:outline-none focus:ring-2 focus:ring-blue-500">
+            <button id="loginBtn">Login</button>
+            <p id="authMessage" class="text-center text-red-400"></p>
+            <p class="text-center text-gray-400 text-sm">
+                No account? Create one in Firebase Authentication console (Email/Password method).
+            </p>
+        </div>
+
+        <!-- AI Streamer Section (Hidden until authenticated) -->
+        <div id="appSection" class="hidden flex-col gap-3">
+            <p class="text-center text-gray-400">Enter a prompt and watch the AI response stream live!</p>
             <label for="prompt" class="text-gray-300 font-medium">Your Prompt:</label>
             <textarea id="prompt" class="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition duration-200" placeholder="e.g., Describe a futuristic city powered by renewable energy."></textarea>
             <button id="generateBtn">
@@ -116,88 +133,246 @@
             <div id="loadingIndicator" class="loading-indicator mt-2">
                 Connecting to AI stream...
             </div>
-        </div>
-
-        <div class="flex flex-col gap-3">
             <label class="text-gray-300 font-medium">AI Response Stream:</label>
             <div id="aiResponse" class="response-box">
                 Your AI-generated response will stream here.
             </div>
+            <button id="logoutBtn" class="bg-red-600 hover:bg-red-700 text-white font-semibold py-2 px-4 rounded-lg shadow-md transition duration-200 ease-in-out transform hover:scale-105 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-opacity-75">
+                Logout
+            </button>
         </div>
     </div>
 
     <script>
+        // --- Firebase Configuration ---
+        // IMPORTANT: Replace with your actual Firebase project config from Firebase Console -> Project settings -> General
+        const firebaseConfig = {
+        apiKey: "AIzaSyA1eaqdKdzUGlIa23PC055ppUrav5J6Ayo",
+        authDomain: "airy-box-466415-u9.firebaseapp.com",
+        projectId: "airy-box-466415-u9",
+        storageBucket: "airy-box-466415-u9.firebasestorage.app",
+        messagingSenderId: "70120003402",
+        appId: "1:70120003402:web:2a529526860e93b213d3b3",
+        measurementId: "G-JXENC7K166"
+        
+        };
+
+        // Initialize Firebase
+        firebase.initializeApp(firebaseConfig);
+        const auth = firebase.auth();
+
+        // --- HTML Elements ---
+        const authSection = document.getElementById('authSection');
+        const appSection = document.getElementById('appSection');
+        const emailInput = document.getElementById('emailInput');
+        const passwordInput = document.getElementById('passwordInput');
+        const loginBtn = document.getElementById('loginBtn');
+        const authMessage = document.getElementById('authMessage');
+        const logoutBtn = document.getElementById('logoutBtn');
+
         const promptInput = document.getElementById('prompt');
         const generateBtn = document.getElementById('generateBtn');
         const aiResponseDiv = document.getElementById('aiResponse');
         const loadingIndicator = document.getElementById('loadingIndicator');
 
         let ws; // WebSocket instance
+        let currentUser = null; // To store authenticated user
 
-        generateBtn.addEventListener('click', () => {
-            const prompt = promptInput.value.trim();
-            if (!prompt) {
-                aiResponseDiv.textContent = 'Please enter a prompt to generate content.';
-                aiResponseDiv.style.backgroundColor = '#fee2e2'; // Light red for error
-                aiResponseDiv.style.color = '#dc2626'; // Red text
+        // --- Firebase Authentication Logic ---
+        loginBtn.addEventListener('click', async () => {
+            const email = emailInput.value;
+            const password = passwordInput.value;
+            authMessage.textContent = ''; // Clear previous messages
+
+            try {
+                await auth.signInWithEmailAndPassword(email, password);
+                // onAuthStateChanged listener will handle UI update
+            } catch (error) {
+                authMessage.textContent = `Login failed: ${error.message}`;
+                console.error('Login error:', error);
+            }
+        });
+
+        logoutBtn.addEventListener('click', async () => {
+            try {
+                await auth.signOut();
+                // onAuthStateChanged listener will handle UI update
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.close(); // Close WebSocket on logout
+                }
+            } catch (error) {
+                console.error('Logout error:', error);
+            }
+        });
+
+        // Listen for authentication state changes
+        auth.onAuthStateChanged(user => {
+            if (user) {
+                // User is signed in
+                currentUser = user;
+                authSection.classList.add('hidden');
+                appSection.classList.remove('hidden');
+                appSection.style.display = 'flex'; // Explicitly ensure it's flex
+                console.log('User logged in:', user.uid);
+                // Automatically try to establish WebSocket connection on login
+                establishWebSocketConnection();
+            } else {
+                // User is signed out
+                currentUser = null;
+                authSection.classList.remove('hidden');
+                appSection.classList.add('hidden');
+                appSection.style.display = 'none'; // Explicitly hide
+                console.log('User logged out.');
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.close(); // Ensure WebSocket is closed
+                }
+                // --- NEW: Clear prompt and response on logout ---
+                promptInput.value = '';
+                aiResponseDiv.textContent = 'Your AI-generated response will stream here.';
+                aiResponseDiv.style.backgroundColor = '#1a202c';
+                aiResponseDiv.style.color = '#a0aec0';
+                // --- END NEW ---
+            }
+        });
+
+        // --- WebSocket Connection Logic ---
+        async function establishWebSocketConnection() {
+            if (!currentUser) {
+                console.warn('Cannot establish WebSocket: No user authenticated.');
+                aiResponseDiv.textContent = 'Please log in to use the AI streamer.';
+                aiResponseDiv.style.backgroundColor = '#fee2e2';
+                aiResponseDiv.style.color = '#dc2626';
                 return;
             }
 
-            // Reset UI
-            aiResponseDiv.textContent = '';
-            aiResponseDiv.style.backgroundColor = '#1a202c';
-            aiResponseDiv.style.color = '#a0aec0';
-            loadingIndicator.style.display = 'block';
-            generateBtn.disabled = true;
+            // Get the ID token for the current user
+            const idToken = await currentUser.getIdToken();
+            console.log('Firebase ID Token obtained.');
 
-            // Determine WebSocket URL: use wss for HTTPS, ws for HTTP
-            // In a Cloud Run environment, it will be wss://<service-url>
-            // For local testing, it will be ws://localhost:8080
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
             const wsUrl = `${protocol}//${window.location.host}/ws`;
 
-            // Close existing WebSocket connection if any
             if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.close();
+                ws.close(); // Close existing connection if any
             }
 
             ws = new WebSocket(wsUrl);
 
             ws.onopen = () => {
-                loadingIndicator.textContent = 'Streaming AI response...';
-                // Send the prompt once the connection is open
-                ws.send(JSON.stringify({ prompt: prompt }));
+                loadingIndicator.textContent = 'Authenticating WebSocket...';
+                // Send the ID token as the first message for authentication
+                ws.send(JSON.stringify({ type: 'auth', token: idToken }));
             };
 
             ws.onmessage = (event) => {
-                // Append received data to the response box
-                aiResponseDiv.textContent += event.data;
-                // Scroll to the bottom to show latest content
-                aiResponseDiv.scrollTop = aiResponseDiv.scrollHeight;
+                let message;
+                try {
+                    // Try parsing as JSON first for control messages
+                    message = JSON.parse(event.data);
+                } catch (e) {
+                    // If it's not JSON, it's likely a raw text chunk from the AI
+                    message = null; // Set to null to indicate not a control message
+                }
+
+                if (message && message.status === 'authenticated') {
+                    loadingIndicator.textContent = `Authenticated as ${message.userId}. Ready to stream AI response...`;
+                    console.log('WebSocket authenticated successfully.');
+                    generateBtn.disabled = false; // Enable generate button only after auth
+                    aiResponseDiv.textContent = 'Authenticated. Enter a prompt and click "Generate Stream".';
+                    aiResponseDiv.style.backgroundColor = '#1a202c';
+                    aiResponseDiv.style.color = '#a0aec0';
+                } else if (message && message.error) {
+                    loadingIndicator.textContent = 'Authentication failed or streaming error.';
+                    aiResponseDiv.textContent = `Error: ${message.error}`;
+                    aiResponseDiv.style.backgroundColor = '#c53030';
+                    aiResponseDiv.style.color = '#fed7d7';
+                    generateBtn.disabled = true;
+                    ws.close(); // Close on auth failure
+                } else if (message && message.type === 'stream_end') { // Handle stream_end message
+                    console.log('AI stream finished signal received.');
+                    loadingIndicator.style.display = 'none'; // Hide loading indicator
+                    generateBtn.disabled = false; // Re-enable button
+                    aiResponseDiv.textContent += '\n\n--- Stream Ended ---'; // Add a visual end marker
+                    aiResponseDiv.style.backgroundColor = '#1a202c'; // Reset background color
+                    aiResponseDiv.style.color = '#a0aec0'; // Reset text color
+                }
+                else {
+                    // This is a streaming AI response (raw text, or if JSON parsing failed)
+                    // Ensure the response box is cleared at the start of a new stream
+                    if (loadingIndicator.textContent.includes('Streaming AI response...') && aiResponseDiv.textContent === '') {
+                        // This condition ensures we only clear if it's the very first chunk of a new stream
+                        // and the div is currently empty (which it should be due to generateBtn click handler)
+                        // This prevents clearing if the first chunk is delayed.
+                    }
+                    aiResponseDiv.textContent += event.data; // Append raw data
+                    aiResponseDiv.scrollTop = aiResponseDiv.scrollHeight;
+                }
             };
 
             ws.onerror = (error) => {
                 console.error('WebSocket Error:', error);
                 loadingIndicator.textContent = 'Error connecting to AI stream.';
                 aiResponseDiv.textContent = `Error: Could not connect to the AI stream or an error occurred during streaming. Please try again.`;
-                aiResponseDiv.style.backgroundColor = '#c53030'; /* Red for error */
+                aiResponseDiv.style.backgroundColor = '#c53030';
                 aiResponseDiv.style.color = '#fed7d7';
-                generateBtn.disabled = false;
+                generateBtn.disabled = true; // Disable button on error
             };
 
             ws.onclose = (event) => {
                 console.log('WebSocket Closed:', event);
                 loadingIndicator.style.display = 'none';
-                generateBtn.disabled = false;
-                if (aiResponseDiv.textContent === '') {
+                generateBtn.disabled = true; // Disable button on close
+                // This block is only for unexpected closes or auth failures now.
+                // Normal stream end is handled by 'stream_end' message.
+
+                if (event.code === 1008) { // Protocol error, often means auth failed
+                    aiResponseDiv.textContent = 'Connection closed: Authentication failed or required.';
+                } else if (aiResponseDiv.textContent === '' || aiResponseDiv.textContent.includes('Authenticated.')) {
                     aiResponseDiv.textContent = 'Stream ended. No content received or connection closed unexpectedly.';
-                    aiResponseDiv.style.backgroundColor = '#c53030'; /* Red for error */
-                    aiResponseDiv.style.color = '#fed7d7';
                 } else {
-                    aiResponseDiv.textContent += '\n\n--- Stream Ended ---';
+                    // If some content was received, but the connection closed unexpectedly (not via stream_end)
+                    aiResponseDiv.textContent += '\n\n--- Connection Unexpectedly Closed ---';
                 }
+                aiResponseDiv.style.backgroundColor = '#fee2e2'; // Light red for error
+                aiResponseDiv.style.color = '#dc2626'; // Red text
             };
+        }
+
+        // --- Generate Stream Button Logic (remains similar) ---
+        generateBtn.addEventListener('click', () => {
+            const prompt = promptInput.value.trim();
+            if (!prompt) {
+                aiResponseDiv.textContent = 'Please enter a prompt to generate content.';
+                aiResponseDiv.style.backgroundColor = '#fee2e2';
+                aiResponseDiv.style.color = '#dc2626';
+                return;
+            }
+
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                aiResponseDiv.textContent = 'WebSocket not connected or authenticated. Please log in again.';
+                aiResponseDiv.style.backgroundColor = '#fee2e2';
+                aiResponseDiv.style.color = '#dc2626';
+                return;
+            }
+
+            // Reset UI for new generation
+            aiResponseDiv.textContent = ''; // Clear previous response content
+            aiResponseDiv.style.backgroundColor = '#1a202c';
+            aiResponseDiv.style.color = '#a0aec0';
+            loadingIndicator.textContent = 'Streaming AI response...';
+            loadingIndicator.style.display = 'block';
+            generateBtn.disabled = true; // Disable during generation
+
+            // Send the prompt through the already established and authenticated WebSocket
+            ws.send(JSON.stringify({ type: 'prompt', prompt: prompt }));
         });
+
+        // Initialize UI state on load
+        document.addEventListener('DOMContentLoaded', () => {
+            appSection.classList.add('hidden'); // Hide app section initially
+            generateBtn.disabled = true; // Disable generate button until authenticated
+        });
+
     </script>
 </body>
 </html>
