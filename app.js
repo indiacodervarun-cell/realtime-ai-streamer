@@ -1,54 +1,80 @@
-    // Load environment variables from .env file
-    require('dotenv').config();
+// Load environment variables from .env file (for local development)
+// In Cloud Run, environment variables are set directly and .env is not used.
+require('dotenv').config();
 
-    const express = require('express');
-    const path = require('path');
-    const WebSocket = require('ws');
-    const http = require('http');
-    const JSONStream = require('jsonstream');
-    const admin = require('firebase-admin'); // Import Firebase Admin SDK
-    const app = express();
-    const PORT = process.env.PORT || 8080;
+const express = require('express');
+const path = require('path');
+const WebSocket = require('ws');
+const http = require('http');
+const JSONStream = require('jsonstream');
+const admin = require('firebase-admin'); // Import Firebase Admin SDK
+const { SecretManagerServiceClient } = require('@google-cloud/secret-manager'); // Import Secret Manager Client
 
-    // Retrieve API key from environment variables
-    const apiKey = process.env.GEMINI_API_KEY || "";
+// Initialize Secret Manager client
+const secretManagerClient = new SecretManagerServiceClient();
 
-    // --- Firebase Admin SDK Initialization ---
-    const serviceAccountPath = process.env.FIREBASE_SERVICE_ACCOUNT_KEY_PATH;
-
-    console.log(`Firebase Service Account Key Path (from env): ${serviceAccountPath}`);
-
-    if (serviceAccountPath) {
-        try {
-            console.log(`Attempting to load service account key from: ${serviceAccountPath}`);
-            const serviceAccount = require(serviceAccountPath); // THIS LINE IS CRITICAL
-            console.log('Service account key loaded successfully.'); // New log
-            admin.initializeApp({
-                credential: admin.credential.cert(serviceAccount)
-            });
-            console.log('Firebase Admin SDK initialized using service account key.');
-        } catch (error) {
-            console.error('ERROR: Failed to initialize Firebase Admin SDK with service account key. Check FIREBASE_SERVICE_ACCOUNT_KEY_PATH and file content.', error);
-            process.exit(1); // Force exit to make error visible
-        }
-    } else {
-        try {
-            console.log('FIREBASE_SERVICE_ACCOUNT_KEY_PATH not set. Attempting to initialize with Application Default Credentials.');
-            admin.initializeApp();
-            console.log('Firebase Admin SDK initialized using Application Default Credentials (or default config).');
-        } catch (error) {
-            console.error('ERROR: Failed to initialize Firebase Admin SDK. No service account path provided and ADC failed.', error);
-            process.exit(1); // Force exit to make error visible
-        }
+// --- Function to fetch secret from Secret Manager ---
+async function getSecret(projectId, secretId) {
+    // Use the correct resource name format for Secret Manager API
+    const name = `projects/${projectId}/secrets/${secretId}/versions/latest`;
+    try {
+        const [version] = await secretManagerClient.accessSecretVersion({ name });
+        // The payload data is a Buffer, convert it to a string
+        return version.payload.data.toString('utf8');
+    } catch (error) {
+        console.error(`ERROR: Failed to access secret "${secretId}" in project "${projectId}":`, error.message);
+        throw new Error(`Could not fetch secret: ${secretId}. Ensure Cloud Run service account has 'Secret Manager Secret Accessor' role.`);
     }
-    // --- End Firebase Admin SDK Initialization ---
+}
+
+const app = express();
+const PORT = process.env.PORT || 8080;
+
+// Retrieve API key from environment variables (set directly in Cloud Run)
+const apiKey = process.env.GEMINI_API_KEY; // Removed || "" - ensure it's set in Cloud Run
+
+if (!apiKey) {
+    console.error("ERROR: GEMINI_API_KEY environment variable is not set. Exiting.");
+    process.exit(1);
+}
+
+// --- Firebase Admin SDK Initialization (ASYNC PROCESS) ---
+async function initializeFirebase() {
+    const projectId = process.env.GCP_PROJECT_ID;
+    const secretId = process.env.FIREBASE_SERVICE_ACCOUNT_KEY_ID;
+
+    if (!projectId || !secretId) {
+        console.error('ERROR: Missing environment variables for Firebase Secret Manager access.');
+        console.error('Ensure GCP_PROJECT_ID and FIREBASE_SERVICE_ACCOUNT_KEY_ID are set in Cloud Run environment variables.');
+        process.exit(1); // Cannot proceed without crucial config
+    }
+
+    try {
+        console.log(`Attempting to fetch Firebase service account key from Secret Manager: Project '${projectId}', Secret ID '${secretId}'`);
+        const secretString = await getSecret(projectId, secretId);
+        const serviceAccount = JSON.parse(secretString);
+
+        admin.initializeApp({
+            credential: admin.credential.cert(serviceAccount)
+        });
+        console.log('Firebase Admin SDK initialized successfully via Secret Manager.');
+    } catch (error) {
+        console.error('CRITICAL ERROR: Failed to initialize Firebase Admin SDK using Secret Manager. Application cannot start.', error);
+        process.exit(1); // Force exit if Firebase fails to init
+    }
+}
+// --- End Firebase Admin SDK Initialization ---
 
 
-    // Create an HTTP server from the Express app
-    const server = http.createServer(app);
+// Create an HTTP server from the Express app
+const server = http.createServer(app);
 
-    // Create a WebSocket server instance
-    const wss = new WebSocket.Server({ server });
+// Create a WebSocket server instance
+const wss = new WebSocket.Server({ server });
+
+// --- Start the Application AFTER Firebase is initialized ---
+initializeFirebase().then(() => {
+    console.log('All critical services (Firebase) initialized. Starting application...');
 
     // Middleware to parse JSON request bodies
     app.use(express.json());
@@ -60,7 +86,6 @@
     app.get('/', (req, res) => {
         res.sendFile(path.join(__dirname, 'public', 'index.html'));
     });
-
 
     // WebSocket connection handling
     wss.on('connection', (ws) => {
@@ -113,7 +138,7 @@
 
                     if (!userPrompt) {
                         ws.send(JSON.stringify({ error: 'Prompt is required.' }));
-                        return; // Don't close connection for missing prompt if already authenticated
+                        return;
                     }
 
                     console.log(`Received prompt from ${userId}:`, userPrompt);
@@ -121,6 +146,12 @@
                     const chatHistory = [{ role: "user", parts: [{ text: userPrompt }] }];
                     const payload = { contents: chatHistory };
 
+                    // Ensure apiKey is available here
+                    if (!apiKey) {
+                        console.error("GEMINI_API_KEY is missing. Cannot make LLM API call.");
+                        ws.send(JSON.stringify({ error: 'Server configuration error: Gemini API key missing.' }));
+                        return;
+                    }
                     const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:streamGenerateContent?key=${apiKey}`;
 
                     console.log('Making LLM API call to:', apiUrl);
@@ -136,7 +167,7 @@
                         const errorBody = await llmResponse.text();
                         console.error('LLM API HTTP Error:', llmResponse.status, errorBody);
                         ws.send(`Error from AI service: ${llmResponse.status} - ${errorBody}`);
-                        return; // Don't close connection for LLM error if already authenticated
+                        return;
                     }
 
                     let receivedContent = false;
@@ -221,4 +252,8 @@
     server.listen(PORT, () => {
         console.log(`Server listening on port ${PORT}`);
     });
-    
+
+}).catch(error => {
+    console.error("CRITICAL ERROR: Application failed to start due to initialization errors.", error);
+    process.exit(1); // Ensure the process exits if async initialization fails
+});

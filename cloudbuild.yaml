@@ -1,5 +1,6 @@
 steps:
 # Step 1: Build the Docker image
+# This step remains the same. The Dockerfile will NOT copy the secret file.
 - name: 'gcr.io/cloud-builders/docker'
   args: [
     'build',
@@ -7,20 +8,15 @@ steps:
     '.'
   ]
 # Step 2: Push the Docker image to Container Registry
+# This step remains the same.
 - name: 'gcr.io/cloud-builders/docker'
   args: [
     'push',
     'gcr.io/$PROJECT_ID/realtime-ai-streamer:${_BUILD_TAG}'
   ]
 
-# Step to fetch the secret from Secret Manager
-- name: 'gcr.io/cloud-builders/gcloud'
-  entrypoint: bash
-  args:
-  - '-c'
-  - |
-    gcloud secrets versions access latest --secret=firebase-service-account-key --format=json > serviceAccountKey.json
 # Step 3: Deploy to Cloud Run
+# - The '--set-env-vars' argument now passes the SECRET_ID and PROJECT_ID.
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
   entrypoint: gcloud
   args: [
@@ -30,17 +26,15 @@ steps:
     '--image', 'gcr.io/$PROJECT_ID/realtime-ai-streamer:${_BUILD_TAG}',
     '--region', 'us-central1',
     '--platform', 'managed',
-    '--allow-unauthenticated', # Keep this for initial testing, but for production, you'd protect the endpoint
+    '--allow-unauthenticated', # Keep this for initial testing
     '--port', '8080',
-    '--set-env-vars', 'GEMINI_API_KEY=${_GEMINI_API_KEY},FIREBASE_SERVICE_ACCOUNT_KEY_PATH=/usr/src/app/serviceAccountKey.json'
+    # Key changes here:
+    '--set-env-vars', 'GEMINI_API_KEY=${_GEMINI_API_KEY},FIREBASE_SERVICE_ACCOUNT_KEY_ID=firebase-service-account-key,GCP_PROJECT_ID=$PROJECT_ID'
   ]
 images:
 - 'gcr.io/$PROJECT_ID/realtime-ai-streamer:${_BUILD_TAG}'
 
-# Define a substitution variable for the API Key (you'll set this in the Cloud Build trigger)
-# This is a placeholder for the actual API key.
+# Define substitution variables
 substitutions:
   _GEMINI_API_KEY: "" # This will be overridden by the trigger or gcloud command
   _BUILD_TAG: "latest"
-# IMPORTANT: You will need to set the _GEMINI_API_KEY substitution in your Cloud Build trigger settings
-# or when running gcloud builds submit

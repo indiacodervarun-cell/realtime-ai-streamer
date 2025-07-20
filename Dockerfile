@@ -12,14 +12,11 @@ COPY package*.json ./
 # Use --production to only install dependencies listed in "dependencies"
 RUN npm install --production
 
-# Copy the service account key file into the container
-COPY serviceAccountKey.json ./
-
 # Copy the rest of your application's source code to the working directory
 COPY . .
 
 # Expose the port that the application listens on.
-# Cloud Run services typically listen on port 8080 by default.
+# Cloud Run services typically listen on port 8080 by default.a
 ENV PORT 8080
 EXPOSE 8080
 
